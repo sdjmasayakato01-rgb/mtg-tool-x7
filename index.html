@@ -115,8 +115,14 @@ function startRecog() {
       $('status').textContent = 'マイク許可なし';
       return;
     }
-    if (e.error !== 'no-speech' && e.error !== 'aborted') console.warn(e.error);
+    if (e.error !== 'no-speech' && e.error !== 'aborted') {
+      console.warn(e.error, e.message);
+      $('status').textContent = '認識エラー: ' + e.error;
+    }
   };
+  // 状態表示（診断用）
+  recog.onaudiostart = () => { $('status').textContent = '● マイク受信中'; };
+  recog.onspeechstart = () => { $('status').textContent = '● 発話を検出'; };
   // 無音で止まるので自動再開
   recog.onend = () => { if (running) try { recog.start(); } catch {} };
   recog.start();
