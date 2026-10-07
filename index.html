@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>会議通訳</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: system-ui, sans-serif; background: #111; color: #eee; height: 100vh; display: flex; flex-direction: column; }
+  header { display: flex; gap: 12px; align-items: center; padding: 10px 16px; background: #1c1c1c; border-bottom: 1px solid #333; flex-wrap: wrap; }
+  header label { font-size: 13px; color: #aaa; }
+  .langbtns { display: flex; gap: 4px; }
+  .langbtns button { padding: 6px 14px; border: 1px solid #444; background: #222; color: #ccc; border-radius: 6px; cursor: pointer; font-size: 14px; }
+  .langbtns button.active { background: #2d6cdf; border-color: #2d6cdf; color: #fff; }
+  #apikey { width: 220px; padding: 6px; background: #222; border: 1px solid #444; color: #eee; border-radius: 6px; }
+  #toggle { padding: 8px 20px; border: 0; border-radius: 6px; background: #2ea043; color: #fff; font-size: 15px; cursor: pointer; margin-left: auto; }
+  #toggle.on { background: #d13b3b; }
+  #clear { padding: 8px 14px; border: 1px solid #444; background: #222; color: #ccc; border-radius: 6px; cursor: pointer; }
+  #status { font-size: 12px; color: #888; min-width: 90px; }
+  main { flex: 1; display: grid; grid-template-columns: 1fr 1fr; overflow: hidden; }
+  .pane { overflow-y: auto; padding: 16px 20px; }
+  .pane + .pane { border-left: 1px solid #333; }
+  .pane h2 { margin: 0 0 12px; font-size: 13px; color: #888; font-weight: normal; letter-spacing: 1px; }
+  .row { min-height: 2.6em; padding: 6px 0; border-bottom: 1px dashed #2a2a2a; font-size: 22px; line-height: 1.5; }
+  .row.pending { color: #777; }
+  .row.err { color: #e66; font-size: 15px; }
+  #interim { color: #888; font-style: italic; font-size: 20px; padding-top: 6px; }
+</style>
+</head>
+<body>
+<header>
+  <label>入力</label><div class="langbtns" id="srcBtns"></div>
+  <label>→ 出力</label><div class="langbtns" id="dstBtns"></div>
+  <input id="apikey" type="password" placeholder="Anthropic APIキー">
+  <span id="status">停止中</span>
+  <button id="clear">クリア</button>
+  <button id="toggle">▶ 開始</button>
+</header>
+<main>
+  <section class="pane"><h2 id="srcTitle"></h2><div id="src"></div><div id="interim"></div></section>
+  <section class="pane"><h2 id="dstTitle"></h2><div id="dst"></div></section>
+</main>
+
+<script>
+const LANGS = {
+  ja: { label: '日本語', code: 'ja-JP', name: 'Japanese' },
+  en: { label: 'English', code: 'en-US', name: 'English' },
+  ko: { label: '한국어', code: 'ko-KR', name: 'Korean' },
+};
+let srcLang = localStorage.getItem('srcLang') || 'ja';
+let dstLang = localStorage.getItem('dstLang') || 'en';
+let running = false, recog = null;
+
+const $ = id => document.getElementById(id);
+$('apikey').value = localStorage.getItem('apiKey') || '';
+$('apikey').addEventListener('change', e => localStorage.setItem('apiKey', e.target.value.trim()));
+
+function renderBtns() {
+  for (const [id, cur, setter] of [['srcBtns', srcLang, v => srcLang = v], ['dstBtns', dstLang, v => dstLang = v]]) {
+    $(id).innerHTML = '';
+    for (const k in LANGS) {
+      const b = document.createElement('button');
+      b.textContent = LANGS[k].label;
+      b.className = k === cur ? 'active' : '';
+      b.onclick = () => {
+        setter(k);
+        if (srcLang === dstLang) {
+          const other = Object.keys(LANGS).find(x => x !== k);
+          id === 'srcBtns' ? dstLang = other : srcLang = other;
+        }
+        localStorage.setItem('srcLang', srcLang);
+        localStorage.setItem('dstLang', dstLang);
+        renderBtns();
+        if (running) restart();
+      };
+      $(id).appendChild(b);
+    }
+  }
+  $('srcTitle').textContent = LANGS[srcLang].label;
+  $('dstTitle').textContent = LANGS[dstLang].label;
+}
+renderBtns();
+
+// キーボード: 1/2/3 で入力言語を即切替、スペースで開始/停止
+document.addEventListener('keydown', e => {
+  if (e.target.tagName === 'INPUT') return;
+  const map = { '1': 'ja', '2': 'en', '3': 'ko' };
+  if (map[e.key]) $('srcBtns').children[Object.keys(LANGS).indexOf(map[e.key])].click();
+  if (e.key === ' ') { e.preventDefault(); $('toggle').click(); }
+});
+
+// ---- 音声認識 ----
+const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+if (!SR) { alert('このブラウザは音声認識に未対応です。Chrome / Edge を使ってください。'); }
+
+function startRecog() {
+  recog = new SR();
+  recog.lang = LANGS[srcLang].code;
+  recog.continuous = true;
+  recog.interimResults = true;
+  recog.onresult = e => {
+    let interim = '';
+    for (let i = e.resultIndex; i < e.results.length; i++) {
+      const t = e.results[i][0].transcript.trim();
+      if (e.results[i].isFinal) { if (t) addRow(t); }
+      else interim += t;
+    }
+    $('interim').textContent = interim;
+  };
+  recog.onerror = e => {
+    // マイク許可が取れない場合は自動再開の連鎖を止める
+    if (e.error === 'not-allowed' || e.error === 'service-not-allowed') {
+      stopRecog();
+      $('toggle').textContent = '▶ 開始';
+      $('toggle').classList.remove('on');
+      $('status').textContent = 'マイク許可なし';
+      return;
+    }
+    if (e.error !== 'no-speech' && e.error !== 'aborted') console.warn(e.error);
+  };
+  // 無音で止まるので自動再開
+  recog.onend = () => { if (running) try { recog.start(); } catch {} };
+  recog.start();
+  $('status').textContent = '● 聞き取り中';
+}
+
+function stopRecog() {
+  running = false;
+  if (recog) { recog.onend = null; recog.stop(); }
+  $('interim').textContent = '';
+  $('status').textContent = '停止中';
+}
+
+function restart() {
+  if (recog) { recog.onend = null; recog.stop(); }
+  startRecog();
+}
+
+$('toggle').onclick = () => {
+  if (!running) {
+    if (!$('apikey').value) { alert('APIキーを入力してください'); return; }
+    running = true;
+    startRecog();
+    $('toggle').textContent = '■ 停止';
+    $('toggle').classList.add('on');
+  } else {
+    stopRecog();
+    $('toggle').textContent = '▶ 開始';
+    $('toggle').classList.remove('on');
+  }
+};
+$('clear').onclick = () => { $('src').innerHTML = ''; $('dst').innerHTML = ''; };
+
+// ---- 行追加＋翻訳 ----
+async function addRow(text) {
+  const s = document.createElement('div');
+  s.className = 'row';
+  s.textContent = text;
+  const d = document.createElement('div');
+  d.className = 'row pending';
+  d.textContent = '…';
+  $('src').appendChild(s);
+  $('dst').appendChild(d);
+  scrollBottom();
+  try {
+    d.textContent = await translate(text, LANGS[srcLang].name, LANGS[dstLang].name);
+    d.classList.remove('pending');
+  } catch (err) {
+    d.textContent = '翻訳エラー: ' + err.message;
+    d.className = 'row err';
+  }
+  scrollBottom();
+}
+
+function scrollBottom() {
+  document.querySelectorAll('.pane').forEach(p => p.scrollTop = p.scrollHeight);
+}
+
+async function translate(text, from, to) {
+  const res = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      'x-api-key': $('apikey').value.trim(),
+      'anthropic-version': '2023-06-01',
+      'anthropic-dangerous-direct-browser-access': 'true',
+    },
+    body: JSON.stringify({
+      model: 'claude-haiku-4-5-20251001',
+      max_tokens: 400,
+      system: `You are a simultaneous interpreter in a business meeting. Translate the user's ${from} utterance into natural spoken ${to}. Output ONLY the translation, no quotes, no explanations.`,
+      messages: [{ role: 'user', content: text }],
+    }),
+  });
+  if (!res.ok) throw new Error(res.status + ' ' + (await res.text()).slice(0, 80));
+  const data = await res.json();
+  return data.content.map(c => c.text || '').join('').trim();
+}
+</script>
+</body>
+</html>
