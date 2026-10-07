@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>マイク診断</title>
+<style>
+  body { font-family: system-ui, sans-serif; background: #111; color: #eee; padding: 20px; max-width: 900px; }
+  button, select { padding: 8px 14px; margin: 4px 6px 4px 0; background: #222; color: #eee; border: 1px solid #555; border-radius: 6px; font-size: 14px; }
+  h2 { font-size: 15px; color: #aaa; margin-top: 28px; }
+  #meter { height: 18px; background: #222; border-radius: 4px; overflow: hidden; width: 400px; }
+  #bar { height: 100%; width: 0; background: #2ea043; transition: width .05s; }
+  #log { background: #000; padding: 10px; font: 13px/1.6 monospace; white-space: pre-wrap; min-height: 200px; border-radius: 6px; }
+</style>
+</head>
+<body>
+<h1 style="font-size:18px">マイク診断</h1>
+<div id="info"></div>
+
+<h2>1. Chromeがマイクの音を受け取れているか</h2>
+<button id="micBtn">マイク取得</button>
+<select id="dev"></select>
+<div id="meter"><div id="bar"></div></div>
+
+<h2>2. 音声認識のイベント</h2>
+<button id="srBtn">音声認識 開始（日本語）</button>
+<button id="srStop">停止</button>
+
+<h2>ログ</h2>
+<div id="log"></div>
+
+<script>
+const $ = id => document.getElementById(id);
+const log = m => { $('log').textContent += new Date().toLocaleTimeString() + '  ' + m + '\n'; };
+$('info').textContent = navigator.userAgent;
+
+let stream, raf;
+async function openMic(deviceId) {
+  if (stream) stream.getTracks().forEach(t => t.stop());
+  cancelAnimationFrame(raf);
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ audio: deviceId ? { deviceId: { exact: deviceId } } : true });
+    const tr = stream.getAudioTracks()[0];
+    log('マイク取得OK: ' + tr.label + ' / muted=' + tr.muted + ' / state=' + tr.readyState);
+    const devs = (await navigator.mediaDevices.enumerateDevices()).filter(d => d.kind === 'audioinput');
+    $('dev').innerHTML = devs.map(d => `<option value="${d.deviceId}">${d.label || '(名前なし)'}</option>`).join('');
+    $('dev').value = tr.getSettings().deviceId || '';
+    log('入力デバイス: ' + devs.map(d => d.label).join(' | '));
+    const ctx = new AudioContext();
+    const an = ctx.createAnalyser();
+    ctx.createMediaStreamSource(stream).connect(an);
+    const buf = new Uint8Array(an.fftSize);
+    const tick = () => {
+      an.getByteTimeDomainData(buf);
+      let peak = 0;
+      for (const v of buf) peak = Math.max(peak, Math.abs(v - 128));
+      $('bar').style.width = Math.min(100, peak / 128 * 300) + '%';
+      raf = requestAnimationFrame(tick);
+    };
+    tick();
+  } catch (e) {
+    log('マイク取得エラー: ' + e.name + ' ' + e.message);
+  }
+}
+$('micBtn').onclick = () => openMic();
+$('dev').onchange = e => openMic(e.target.value);
+
+const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+let r;
+$('srBtn').onclick = () => {
+  if (!SR) { log('SpeechRecognition 非対応'); return; }
+  r = new SR();
+  r.lang = 'ja-JP'; r.continuous = true; r.interimResults = true;
+  for (const ev of ['start', 'audiostart', 'soundstart', 'speechstart', 'speechend', 'soundend', 'audioend', 'end', 'nomatch']) {
+    r.addEventListener(ev, () => log('[SR] ' + ev));
+  }
+  r.onerror = e => log('[SR] error: ' + e.error + ' ' + (e.message || ''));
+  r.onresult = e => {
+    const x = e.results[e.results.length - 1];
+    log('[SR] result' + (x.isFinal ? '(確定)' : '') + ': ' + x[0].transcript);
+  };
+  try { r.start(); log('[SR] start() 呼び出し'); } catch (e) { log('[SR] start例外: ' + e.message); }
+};
+$('srStop').onclick = () => { if (r) r.stop(); };
+</script>
+</body>
+</html>
