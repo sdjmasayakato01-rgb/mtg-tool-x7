@@ -14,7 +14,7 @@
   #apikey { width: 220px; padding: 6px; background: #222; border: 1px solid #444; color: #eee; border-radius: 6px; }
   #toggle { padding: 8px 20px; border: 0; border-radius: 6px; background: #2ea043; color: #fff; font-size: 15px; cursor: pointer; margin-left: auto; }
   #toggle.on { background: #d13b3b; }
-  #clear { padding: 8px 14px; border: 1px solid #444; background: #222; color: #ccc; border-radius: 6px; cursor: pointer; }
+  #save, #clear { padding: 8px 14px; border: 1px solid #444; background: #222; color: #ccc; border-radius: 6px; cursor: pointer; }
   #status { font-size: 12px; color: #888; min-width: 90px; }
   main { flex: 1; display: grid; grid-template-columns: 1fr 1fr; overflow: hidden; }
   .pane { overflow-y: auto; padding: 16px 20px; }
@@ -32,6 +32,7 @@
   <label>→ 出力</label><div class="langbtns" id="dstBtns"></div>
   <input id="apikey" type="password" placeholder="Anthropic APIキー">
   <span id="status">停止中</span>
+  <button id="save">ログ保存</button>
   <button id="clear">クリア</button>
   <button id="toggle">▶ 開始</button>
 </header>
@@ -49,6 +50,7 @@ const LANGS = {
 let srcLang = localStorage.getItem('srcLang') || 'ja';
 let dstLang = localStorage.getItem('dstLang') || 'en';
 let running = false, recog = null;
+const entries = []; // 会議ログ: {time, from, to, src, dst}
 
 const $ = id => document.getElementById(id);
 $('apikey').value = localStorage.getItem('apiKey') || '';
@@ -85,6 +87,7 @@ document.addEventListener('keydown', e => {
   if (e.target.tagName === 'INPUT') return;
   const map = { '1': 'ja', '2': 'en', '3': 'ko' };
   if (map[e.key]) $('srcBtns').children[Object.keys(LANGS).indexOf(map[e.key])].click();
+  if ((e.ctrlKey || e.metaKey) && e.key === 's') { e.preventDefault(); $('save').click(); return; }
   if (e.key === ' ') { e.preventDefault(); $('toggle').click(); }
 });
 
@@ -154,7 +157,28 @@ $('toggle').onclick = () => {
     $('toggle').classList.remove('on');
   }
 };
-$('clear').onclick = () => { $('src').innerHTML = ''; $('dst').innerHTML = ''; };
+$('clear').onclick = () => {
+  if (entries.length && !confirm('表示とログを消去します。保存していない内容は失われます。よろしいですか？')) return;
+  $('src').innerHTML = ''; $('dst').innerHTML = ''; entries.length = 0;
+};
+
+// ---- ログ保存（テキストファイルとしてダウンロード） ----
+const pad = n => String(n).padStart(2, '0');
+const hms = d => `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+$('save').onclick = () => {
+  if (!entries.length) { alert('保存するログがありません'); return; }
+  const now = new Date();
+  const head = `会議ログ ${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}\n\n`;
+  const body = entries.map(e =>
+    `[${hms(e.time)}] ${LANGS[e.from].label} → ${LANGS[e.to].label}\n${e.src}\n${e.dst}\n`
+  ).join('\n');
+  const blob = new Blob(['\uFEFF' + head + body], { type: 'text/plain;charset=utf-8' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `会議ログ_${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}_${pad(now.getHours())}${pad(now.getMinutes())}.txt`;
+  a.click();
+  URL.revokeObjectURL(a.href);
+};
 
 // ---- 行追加＋翻訳 ----
 async function addRow(text) {
@@ -164,15 +188,19 @@ async function addRow(text) {
   const d = document.createElement('div');
   d.className = 'row pending';
   d.textContent = '…';
+  const entry = { time: new Date(), from: srcLang, to: dstLang, src: text, dst: '（翻訳中）' };
+  entries.push(entry);
   $('src').appendChild(s);
   $('dst').appendChild(d);
   scrollBottom();
   try {
-    d.textContent = await translate(text, LANGS[srcLang].name, LANGS[dstLang].name);
+    d.textContent = await translate(text, LANGS[entry.from].name, LANGS[entry.to].name);
+    entry.dst = d.textContent;
     d.classList.remove('pending');
   } catch (err) {
     d.textContent = '翻訳エラー: ' + err.message;
     d.className = 'row err';
+    entry.dst = '（翻訳エラー）';
   }
   scrollBottom();
 }
